@@ -16,6 +16,7 @@ package bloomberg.presto.accumulo;
 import javax.validation.constraints.NotNull;
 
 import io.airlift.configuration.Config;
+import io.airlift.configuration.InvalidConfigurationException;
 
 public class AccumuloConfig {
     private String instance;
@@ -23,6 +24,7 @@ public class AccumuloConfig {
     private String username;
     private String password;
     private String zkMetadataRoot;
+    private Integer numSplitsPerTablet;
 
     @NotNull
     public String getInstance() {
@@ -76,5 +78,21 @@ public class AccumuloConfig {
     @Config("zookeeper.metadata.root")
     public void setZkMetadataRoot(String zkMetadataRoot) {
         this.zkMetadataRoot = zkMetadataRoot;
+    }
+
+    @NotNull
+    public int getNumSplitsPerTablet() {
+        return numSplitsPerTablet == null ? 1 : numSplitsPerTablet;
+    }
+
+    @Config("num.splits.per.tablet")
+    public void setNumSplitsPerTablet(int n)
+            throws InvalidConfigurationException {
+        if ((n & (n - 1)) == 0) {
+            this.numSplitsPerTablet = n;
+        } else {
+            throw new InvalidConfigurationException(
+                    "Number of splits per tablet must be power of 2", n);
+        }
     }
 }

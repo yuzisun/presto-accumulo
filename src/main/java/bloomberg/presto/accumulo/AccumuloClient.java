@@ -125,7 +125,6 @@ public class AccumuloClient {
     }
 
     public AccumuloTable getTable(String schema, String tableName) {
-        LOG.debug("getTable");
         requireNonNull(schema, "schema is null");
         requireNonNull(tableName, "tableName is null");
         return new AccumuloTable(tableName,
@@ -146,38 +145,125 @@ public class AccumuloClient {
             List<TabletSplitMetadata> tabletSplits = new ArrayList<>();
             String prevSplit = null;
             for (Text tSplit : conn.tableOperations().listSplits(fulltable)) {
-                String split = tSplit.toString();
 
+                // get the tablet location, host and port
+                String split = tSplit.toString();
                 String loc = this.getTabletLocation(fulltable, split);
                 String host = HostAddress.fromString(loc).getHostText();
                 int port = HostAddress.fromString(loc).getPort();
 
-                RangeHandle rHandle = prevSplit == null
-                        ? new RangeHandle(null, true, split, true)
-                        : new RangeHandle(prevSplit, false, split, true);
-
+                addTabletSplitMetadata(host, port, tabletSplits, prevSplit,
+                        split);
                 prevSplit = split;
-
-                tabletSplits.add(new TabletSplitMetadata(split.toString(), host,
-                        port, rHandle));
             }
 
             // last range from prevSplit to infinity
             String loc = this.getTabletLocation(fulltable, null);
             String host = HostAddress.fromString(loc).getHostText();
             int port = HostAddress.fromString(loc).getPort();
-
-            tabletSplits.add(new TabletSplitMetadata(null, host, port,
-                    new RangeHandle(prevSplit, false, null, true)));
-
+            addTabletSplitMetadata(host, port, tabletSplits, prevSplit, null);
             return tabletSplits;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
+    private void addTabletSplitMetadata(String host, int port,
+            List<TabletSplitMetadata> tabletSplits, String startSplit,
+            String endSplit) {
+        // edge case when startSplit == endSplit, or both null, no need to split
+        if (startSplit == null && endSplit == null) {
+            LOG.debug("start/end splits are both null");
+            addTSM(tabletSplits, new TabletSplitMetadata(null, host, port,
+                    new RangeHandle(null, true, null, true)));
+            return;
+        } else if (startSplit != null && endSplit != null
+                && startSplit.equals(endSplit)) {
+            LOG.debug("start/end splits are equal");
+            addTSM(tabletSplits, new TabletSplitMetadata(endSplit, host, port,
+                    new RangeHandle(endSplit, true, endSplit, true)));
+            return;
+        }
+
+        // we'll now split this split further based on the configuration
+        // get a flag saying if split is null, as the splitter doesn't
+        // support null arrays
+        boolean startIsNull = startSplit == null;
+        boolean endIsNull = endSplit == null;
+
+        // set the byte arrays to empty or the split bytes
+        byte[] start = startIsNull ? "".getBytes() : startSplit.getBytes();
+        byte[] end = endIsNull ? "".getBytes() : endSplit.getBytes();
+
+        // make a new array of all our split locations based on the
+        // number + 1
+        byte[][] finalSplits = new byte[conf.getNumSplitsPerTablet() + 1][];
+        finalSplits[0] = start;
+        finalSplits[finalSplits.length - 1] = end;
+
+        // recursively split the tablet into smaller pieces, our
+        // configuration enforces the
+        // number of splits is a power of two
+        splitHelper(finalSplits, start, end, 0, conf.getNumSplitsPerTablet());
+
+        for (int i = 0; i < finalSplits.length; ++i) {
+            System.out.println(i + " " + new String(finalSplits[i]));
+        }
+
+        // and now we'll build the ranges from the splits
+        for (int i = 0; i < finalSplits.length - 1; ++i) {
+
+            try {
+                String startKey = i == 0 && startIsNull ? null
+                        : new String(finalSplits[i]);
+                String endKey = i == finalSplits.length - 2 && endIsNull ? null
+                        : new String(finalSplits[i + 1]);
+
+                new Range(startKey, false, endKey, true);
+
+                addTSM(tabletSplits, new TabletSplitMetadata(endKey, host, port,
+                        new RangeHandle(startKey, false, endKey, true)));
+            } catch (IllegalArgumentException e) {
+                LOG.error(e.getMessage());
+            }
+        }
+    }
+
+    private void addTSM(List<TabletSplitMetadata> tabletSplits,
+            TabletSplitMetadata tsm) {
+        if (!tabletSplits.contains(tsm)) {
+            LOG.debug("Added tablet split " + tsm);
+            tabletSplits.add(tsm);
+        } else {
+            LOG.debug("Tablet split already in list, " + tsm);
+        }
+    }
+
+    long iter = 0;
+
+    private void splitHelper(byte[][] dest, byte[] a, byte[] b, int offset,
+            int len) {
+        dest[offset + (len / 2)] = Utils.average(a, b);
+
+        System.out.println(
+                String.format("%d %d %s", iter, offset, new String(a)));
+        System.out.println(String.format("%d %d %s", iter, len, new String(b)));
+        System.out.println(String.format("%d %d %s", iter, offset + (len / 2),
+                new String(dest[offset + (len / 2)])));
+
+        ++iter;
+        if (len / 2 > 1) {
+            // left side
+            splitHelper(dest, a, dest[len / 2], offset, len / 2);
+
+            // right side
+            splitHelper(dest, dest[len / 2], b, len / 2, len / 2);
+        }
+    }
+
     /**
-     * Scans Accumulo's metadata table to retrieve the
+     * Scans Accumulo's metadata table to retrieve the location of a given
+     * tablet
      * 
      * @param fulltable
      *            The full table name &lt;namespace&gt;.&lt;tablename&gt;, or
